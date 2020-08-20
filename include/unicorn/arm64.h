@@ -1,8 +1,11 @@
+/* Unicorn Emulator Engine */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015-2017 */
+/* This file is released under LGPL2.
+   See COPYING.LGPL2 in root directory for more details
+*/
+
 #ifndef UNICORN_ARM64_H
 #define UNICORN_ARM64_H
-
-/* Unicorn Emulator Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -286,13 +289,50 @@ typedef enum uc_arm64_reg {
     UC_ARM64_REG_TPIDR_EL0,
     UC_ARM64_REG_TPIDRRO_EL0,
     UC_ARM64_REG_TPIDR_EL1,
-    
+
+    UC_ARM64_REG_PSTATE,
+
+    //> exception link registers
+    UC_ARM64_REG_ELR_EL0,
+    UC_ARM64_REG_ELR_EL1,
+    UC_ARM64_REG_ELR_EL2,
+    UC_ARM64_REG_ELR_EL3,
+
+    //> stack pointers registers
+    UC_ARM64_REG_SP_EL0,
+    UC_ARM64_REG_SP_EL1,
+    UC_ARM64_REG_SP_EL2,
+    UC_ARM64_REG_SP_EL3,
+
+    //> other CP15 registers
+    UC_ARM64_REG_TTBR0_EL1,
+    UC_ARM64_REG_TTBR1_EL1,
+
+    UC_ARM64_REG_ESR_EL0,
+    UC_ARM64_REG_ESR_EL1,
+    UC_ARM64_REG_ESR_EL2,
+    UC_ARM64_REG_ESR_EL3,
+
+    UC_ARM64_REG_FAR_EL0,
+    UC_ARM64_REG_FAR_EL1,
+    UC_ARM64_REG_FAR_EL2,
+    UC_ARM64_REG_FAR_EL3,
+
+    UC_ARM64_REG_PAR_EL1,
+
+    UC_ARM64_REG_MAIR_EL1,
+
+    UC_ARM64_REG_VBAR_EL0,
+    UC_ARM64_REG_VBAR_EL1,
+    UC_ARM64_REG_VBAR_EL2,
+    UC_ARM64_REG_VBAR_EL3,
+
     UC_ARM64_REG_ENDING,		// <-- mark the end of the list of registers
 
     //> alias registers
 
-    UC_ARM64_REG_IP1 = UC_ARM64_REG_X16,
-    UC_ARM64_REG_IP0 = UC_ARM64_REG_X17,
+    UC_ARM64_REG_IP0 = UC_ARM64_REG_X16,
+    UC_ARM64_REG_IP1 = UC_ARM64_REG_X17,
     UC_ARM64_REG_FP = UC_ARM64_REG_X29,
     UC_ARM64_REG_LR = UC_ARM64_REG_X30,
 } uc_arm64_reg;

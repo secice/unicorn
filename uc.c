@@ -28,7 +28,7 @@
 static void free_table(gpointer key, gpointer value, gpointer data)
 {
     TypeInfo *ti = (TypeInfo*) value;
-    g_free((void *) ti->class);
+    g_free((void *) ti->class_);
     g_free((void *) ti->name);
     g_free((void *) ti->parent);
     g_free((void *) ti);
@@ -371,12 +371,13 @@ uc_err uc_reg_read_batch(uc_engine *uc, int *ids, void **vals, int count)
 UNICORN_EXPORT
 uc_err uc_reg_write_batch(uc_engine *uc, int *ids, void *const *vals, int count)
 {
+    int ret = UC_ERR_OK;
     if (uc->reg_write)
-        uc->reg_write(uc, (unsigned int *)ids, vals, count);
+        ret = uc->reg_write(uc, (unsigned int *)ids, vals, count);
     else
-        return -1;  // FIXME: need a proper uc_err
+        return UC_ERR_EXCEPTION;  // FIXME: need a proper uc_err
 
-    return UC_ERR_OK;
+    return ret;
 }
 
 
@@ -503,6 +504,7 @@ static void *_timeout_fn(void *arg)
 
     // timeout before emulation is done?
     if (!uc->emulation_done) {
+        uc->timed_out = true;
         // force emulation to stop
         uc_emu_stop(uc);
     }
@@ -526,6 +528,29 @@ static void hook_count_cb(struct uc_struct *uc, uint64_t address, uint32_t size,
         uc_emu_stop(uc);
 }
 
+static void clear_deleted_hooks(uc_engine *uc)
+{
+    struct list_item * cur;
+    struct hook * hook;
+    int i;
+    
+    for (cur = uc->hooks_to_del.head; cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
+        assert(hook->to_delete);
+        for (i = 0; i < UC_HOOK_MAX; i++) {
+            if (list_remove(&uc->hook[i], (void *)hook)) {
+                if (--hook->refs == 0) {
+                    free(hook);
+                }
+
+                // a hook cannot be twice in the same list
+                break;
+            }
+        }
+    }
+
+    list_clear(&uc->hooks_to_del);
+}
+
 UNICORN_EXPORT
 uc_err uc_emu_start(uc_engine* uc, uint64_t begin, uint64_t until, uint64_t timeout, size_t count)
 {
@@ -534,6 +559,8 @@ uc_err uc_emu_start(uc_engine* uc, uint64_t begin, uint64_t until, uint64_t time
     uc->invalid_error = UC_ERR_OK;
     uc->block_full = false;
     uc->emulation_done = false;
+    uc->size_recur_mem = 0;
+    uc->timed_out = false;
 
     switch(uc->arch) {
         default:
@@ -548,9 +575,16 @@ uc_err uc_emu_start(uc_engine* uc, uint64_t begin, uint64_t until, uint64_t time
             switch(uc->mode) {
                 default:
                     break;
-                case UC_MODE_16:
-                    uc_reg_write(uc, UC_X86_REG_IP, &begin);
+                case UC_MODE_16: {
+                    uint64_t ip;
+                    uint16_t cs;
+
+                    uc_reg_read(uc, UC_X86_REG_CS, &cs);
+                    // compensate for later adding up IP & CS
+                    ip = begin - cs*16;
+                    uc_reg_write(uc, UC_X86_REG_IP, &ip);
                     break;
+                }
                 case UC_MODE_32:
                     uc_reg_write(uc, UC_X86_REG_EIP, &begin);
                     break;
@@ -618,6 +652,9 @@ uc_err uc_emu_start(uc_engine* uc, uint64_t begin, uint64_t until, uint64_t time
 
     // emulation is done
     uc->emulation_done = true;
+
+    // remove hooks to delete
+    clear_deleted_hooks(uc);
 
     if (timeout) {
         // wait for the timer to finish
@@ -794,6 +831,8 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr, uint64_t addres
     uint32_t perms;
     uint64_t begin, end, chunk_end;
     size_t l_size, m_size, r_size;
+    RAMBlock *block = NULL;
+    bool prealloc = false;
 
     chunk_end = address + size;
 
@@ -810,9 +849,26 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr, uint64_t addres
         // impossible case
         return false;
 
-    backup = copy_region(uc, mr);
-    if (backup == NULL)
+    QTAILQ_FOREACH(block, &uc->ram_list.blocks, next) {
+        if (block->offset <= mr->addr && block->length >= (mr->end - mr->addr)) {
+            break;
+        }
+    }
+
+    if (block == NULL)
         return false;
+
+    // RAM_PREALLOC is not defined outside exec.c and I didn't feel like
+    // moving it
+	prealloc = !!(block->flags & 1);
+
+    if (block->flags & 1) {
+        backup = block->host;
+    } else {
+        backup = copy_region(uc, mr);
+        if (backup == NULL)
+            return false;
+    }
 
     // save the essential information required for the split before mr gets deleted
     perms = mr->perms;
@@ -846,31 +902,48 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr, uint64_t addres
     // allocation just failed so no guarantee that we can recover the original
     // allocation at this point
     if (l_size > 0) {
-        if (uc_mem_map(uc, begin, l_size, perms) != UC_ERR_OK)
-            goto error;
-        if (uc_mem_write(uc, begin, backup, l_size) != UC_ERR_OK)
-            goto error;
+        if (!prealloc) {
+            if (uc_mem_map(uc, begin, l_size, perms) != UC_ERR_OK)
+                goto error;
+            if (uc_mem_write(uc, begin, backup, l_size) != UC_ERR_OK)
+                goto error;
+        } else {
+            if (uc_mem_map_ptr(uc, begin, l_size, perms, backup) != UC_ERR_OK)
+                goto error;
+        }
     }
 
     if (m_size > 0 && !do_delete) {
-        if (uc_mem_map(uc, address, m_size, perms) != UC_ERR_OK)
-            goto error;
-        if (uc_mem_write(uc, address, backup + l_size, m_size) != UC_ERR_OK)
-            goto error;
+        if (!prealloc) {
+            if (uc_mem_map(uc, address, m_size, perms) != UC_ERR_OK)
+                goto error;
+            if (uc_mem_write(uc, address, backup + l_size, m_size) != UC_ERR_OK)
+                goto error;
+        } else {
+            if (uc_mem_map_ptr(uc, address, m_size, perms, backup + l_size) != UC_ERR_OK)
+                goto error;
+        }
     }
 
     if (r_size > 0) {
-        if (uc_mem_map(uc, chunk_end, r_size, perms) != UC_ERR_OK)
-            goto error;
-        if (uc_mem_write(uc, chunk_end, backup + l_size + m_size, r_size) != UC_ERR_OK)
-            goto error;
+        if (!prealloc) {
+            if (uc_mem_map(uc, chunk_end, r_size, perms) != UC_ERR_OK)
+                goto error;
+            if (uc_mem_write(uc, chunk_end, backup + l_size + m_size, r_size) != UC_ERR_OK)
+                goto error;
+        } else {
+            if (uc_mem_map_ptr(uc, chunk_end, r_size, perms, backup + l_size + m_size) != UC_ERR_OK)
+                goto error;
+        }
     }
 
-    free(backup);
+    if (!prealloc)
+        free(backup);
     return true;
 
 error:
-    free(backup);
+    if (!prealloc)
+        free(backup);
     return false;
 }
 
@@ -1033,6 +1106,7 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
     hook->callback = callback;
     hook->user_data = user_data;
     hook->refs = 0;
+    hook->to_delete = false;
     *hh = (uc_hook)hook;
 
     // UC_HOOK_INSN has an extra argument for instruction ID
@@ -1100,24 +1174,25 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
     return ret;
 }
 
+
 UNICORN_EXPORT
 uc_err uc_hook_del(uc_engine *uc, uc_hook hh)
 {
     int i;
     struct hook *hook = (struct hook *)hh;
+
     // we can't dereference hook->type if hook is invalid
     // so for now we need to iterate over all possible types to remove the hook
     // which is less efficient
     // an optimization would be to align the hook pointer
     // and store the type mask in the hook pointer.
     for (i = 0; i < UC_HOOK_MAX; i++) {
-        if (list_remove(&uc->hook[i], (void *)hook)) {
-            if (--hook->refs == 0) {
-                free(hook);
-                break;
-            }
+        if (list_exists(&uc->hook[i], (void *) hook)) {
+            hook->to_delete = true;
+            list_append(&uc->hooks_to_del, hook);
         }
     }
+
     return UC_ERR_OK;
 }
 
@@ -1126,7 +1201,7 @@ void helper_uc_tracecode(int32_t size, uc_hook_type type, void *handle, int64_t 
 void helper_uc_tracecode(int32_t size, uc_hook_type type, void *handle, int64_t address)
 {
     struct uc_struct *uc = handle;
-    struct list_item *cur = uc->hook[type].head;
+    struct list_item *cur;
     struct hook *hook;
 
     // sync PC in CPUArchState with address
@@ -1134,12 +1209,12 @@ void helper_uc_tracecode(int32_t size, uc_hook_type type, void *handle, int64_t 
         uc->set_pc(uc, address);
     }
 
-    while (cur != NULL && !uc->stop_request) {
-        hook = (struct hook *)cur->data;
+    for (cur = uc->hook[type].head; cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
+        if (hook->to_delete)
+            continue;
         if (HOOK_BOUND_CHECK(hook, (uint64_t)address)) {
             ((uc_cb_hookcode_t)hook->callback)(uc, address, size, hook->user_data);
         }
-        cur = cur->next;
     }
 }
 
@@ -1173,23 +1248,29 @@ uint32_t uc_mem_regions(uc_engine *uc, uc_mem_region **regions, uint32_t *count)
 UNICORN_EXPORT
 uc_err uc_query(uc_engine *uc, uc_query_type type, size_t *result)
 {
-    if (type == UC_QUERY_PAGE_SIZE) {
-        *result = uc->target_page_size;
-        return UC_ERR_OK;
-    }
-
-    if (type == UC_QUERY_ARCH) {
-        *result = uc->arch;
-        return UC_ERR_OK;
-    }
-
-    switch(uc->arch) {
-#ifdef UNICORN_HAS_ARM
-        case UC_ARCH_ARM:
-            return uc->query(uc, type, result);
-#endif
+    switch(type) {
         default:
             return UC_ERR_ARG;
+
+        case UC_QUERY_PAGE_SIZE:
+            *result = uc->target_page_size;
+            break;
+
+        case UC_QUERY_ARCH:
+            *result = uc->arch;
+            break;
+
+        case UC_QUERY_MODE:
+#ifdef UNICORN_HAS_ARM
+            if (uc->arch == UC_ARCH_ARM) {
+                return uc->query(uc, type, result);
+            }
+#endif
+            return UC_ERR_ARG;
+
+        case UC_QUERY_TIMEOUT:
+            *result = uc->timed_out;
+            break;
     }
 
     return UC_ERR_OK;
@@ -1242,9 +1323,10 @@ uc_err uc_context_alloc(uc_engine *uc, uc_context **context)
     struct uc_context **_context = context;
     size_t size = cpu_context_size(uc->arch, uc->mode);
 
-    *_context = malloc(size + sizeof(uc_context));
+    *_context = malloc(size);
     if (*_context) {
-        (*_context)->size = size;
+        (*_context)->jmp_env_size = sizeof(*uc->cpu->jmp_env);
+        (*_context)->context_size = size - sizeof(uc_context) - (*_context)->jmp_env_size;
         return UC_ERR_OK;
     } else {
         return UC_ERR_NOMEM;
@@ -1259,17 +1341,26 @@ uc_err uc_free(void *mem)
 }
 
 UNICORN_EXPORT
+size_t uc_context_size(uc_engine *uc)
+{
+    // return the total size of struct uc_context
+    return sizeof(uc_context) + cpu_context_size(uc->arch, uc->mode) + sizeof(*uc->cpu->jmp_env);
+}
+
+UNICORN_EXPORT
 uc_err uc_context_save(uc_engine *uc, uc_context *context)
 {
-    struct uc_context *_context = context;
-    memcpy(_context->data, uc->cpu->env_ptr, _context->size);
+    memcpy(context->data, uc->cpu->env_ptr, context->context_size);
+    memcpy(context->data + context->context_size, uc->cpu->jmp_env, context->jmp_env_size);
+
     return UC_ERR_OK;
 }
 
 UNICORN_EXPORT
 uc_err uc_context_restore(uc_engine *uc, uc_context *context)
 {
-    struct uc_context *_context = context;
-    memcpy(uc->cpu->env_ptr, _context->data, _context->size);
+    memcpy(uc->cpu->env_ptr, context->data, context->context_size);
+    memcpy(uc->cpu->jmp_env, context->data + context->context_size, context->jmp_env_size);
+
     return UC_ERR_OK;
 }

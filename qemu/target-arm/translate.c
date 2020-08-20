@@ -132,7 +132,7 @@ static void load_reg_var(DisasContext *s, TCGv_i32 var, int reg)
             addr = (long)s->pc + 4;
         tcg_gen_movi_i32(tcg_ctx, var, addr);
     } else {
-        tcg_gen_mov_i32(tcg_ctx, var, tcg_ctx->cpu_R[reg]);
+        tcg_gen_mov_i32(tcg_ctx, var, tcg_ctx->cpu_R[reg & 0x0f]);
     }
 }
 
@@ -154,7 +154,7 @@ static void store_reg(DisasContext *s, int reg, TCGv_i32 var)
         tcg_gen_andi_i32(tcg_ctx, var, var, ~1);
         s->is_jmp = DISAS_JUMP;
     }
-    tcg_gen_mov_i32(tcg_ctx, tcg_ctx->cpu_R[reg], var);
+    tcg_gen_mov_i32(tcg_ctx, tcg_ctx->cpu_R[reg & 0x0f], var);
     tcg_temp_free_i32(tcg_ctx, var);
 }
 
@@ -806,8 +806,10 @@ void arm_gen_test_cc(TCGContext *tcg_ctx, int cc, int label)
         tcg_temp_free_i32(tcg_ctx, tmp);
         break;
     default:
-        fprintf(stderr, "Bad condition code 0x%x\n", cc);
-        abort();
+        /* fprintf(stderr, "Bad condition code 0x%x\n", cc); */
+        tmp = tcg_const_i32(tcg_ctx, EXCP_EXCEPTION_EXIT);
+        gen_helper_exception_internal(tcg_ctx, tcg_ctx->cpu_env, tmp);
+        tcg_temp_free_i32(tcg_ctx, tmp);
     }
 }
 
@@ -2692,8 +2694,8 @@ static int disas_dsp_insn(DisasContext *s, uint32_t insn)
 // on msvc, so is replaced with separate versions for the shift to perform.
 //#define VFP_REG_SHR(x, n) (((n) > 0) ? (x) >> (n) : (x) << -(n))
 #if 0
-//#define VFP_SREG(insn, bigbit, smallbit) \
-//  ((VFP_REG_SHR(insn, bigbit - 1) & 0x1e) | (((insn) >> (smallbit)) & 1))
+#define VFP_SREG(insn, bigbit, smallbit) \
+  ((VFP_REG_SHR(insn, bigbit - 1) & 0x1e) | (((insn) >> (smallbit)) & 1))
 #endif
 
 #define VFP_REG_SHR_NEG(insn, n) ((insn) << -(n))
@@ -6142,7 +6144,7 @@ static int disas_neon_data_insn(DisasContext *s, uint32_t insn)
                         val = 0;
                         for (n = 0; n < 4; n++) {
                             if (imm & (1 << (n + (pass & 1) * 4)))
-                                val |= 0xff << (n * 8);
+                                val |= 0xffU << (n * 8);
                         }
                         tcg_gen_movi_i32(tcg_ctx, tmp, val);
                     } else {
@@ -7853,9 +7855,9 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)  // qq
             tcg_gen_movi_i32(tcg_ctx, tmp, val);
             store_reg(s, 14, tmp);
             /* Sign-extend the 24-bit offset */
-            offset = (((int32_t)insn) << 8) >> 8;
+            offset = ((int32_t)(insn << 8)) >> 8;
             /* offset * 4 + bit24 * 2 + (thumb bit) */
-            val += (offset << 2) | ((insn >> 23) & 2) | 1;
+            val += (((uint32_t)offset) << 2) | ((insn >> 23) & 2) | 1;
             /* pipeline offset */
             val += 4;
             /* protected by ARCH(5); above, near the start of uncond block */
@@ -8532,34 +8534,29 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)  // qq
                 }
             } else {
                 int address_offset;
-                int load;
+                int load = insn & (1 << 20);
+                int wbit = insn & (1 << 21);
+                int pbit = insn & (1 << 24);
+                int doubleword = 0;
                 /* Misc load/store */
                 rn = (insn >> 16) & 0xf;
                 rd = (insn >> 12) & 0xf;
+                if (!load && (sh & 2)) {
+                    /* doubleword */
+                    ARCH(5TE);
+                    if (rd & 1) {
+                        /* UNPREDICTABLE; we choose to UNDEF */
+                        goto illegal_op;
+                    }
+                    load = (sh & 1) == 0;
+                    doubleword = 1;
+                }
                 addr = load_reg(s, rn);
-                if (insn & (1 << 24))
+                if (pbit)
                     gen_add_datah_offset(s, insn, 0, addr);
                 address_offset = 0;
-                if (insn & (1 << 20)) {
-                    /* load */
-                    tmp = tcg_temp_new_i32(tcg_ctx);
-                    switch(sh) {
-                    case 1:
-                        gen_aa32_ld16u(s, tmp, addr, get_mem_index(s));
-                        break;
-                    case 2:
-                        gen_aa32_ld8s(s, tmp, addr, get_mem_index(s));
-                        break;
-                    default:
-                    case 3:
-                        gen_aa32_ld16s(s, tmp, addr, get_mem_index(s));
-                        break;
-                    }
-                    load = 1;
-                } else if (sh & 2) {
-                    ARCH(5TE);
-                    /* doubleword */
-                    if (sh & 1) {
+                if (doubleword) {
+                    if (!load) {
                         /* store */
                         tmp = load_reg(s, rd);
                         gen_aa32_st32(s, tmp, addr, get_mem_index(s));
@@ -8568,7 +8565,6 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)  // qq
                         tmp = load_reg(s, rd + 1);
                         gen_aa32_st32(s, tmp, addr, get_mem_index(s));
                         tcg_temp_free_i32(tcg_ctx, tmp);
-                        load = 0;
                     } else {
                         /* load */
                         tmp = tcg_temp_new_i32(tcg_ctx);
@@ -8578,24 +8574,37 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)  // qq
                         tmp = tcg_temp_new_i32(tcg_ctx);
                         gen_aa32_ld32u(s, tmp, addr, get_mem_index(s));
                         rd++;
-                        load = 1;
                     }
                     address_offset = -4;
+                } else if (load) {
+                    /* load */
+                    tmp = tcg_temp_new_i32(tcg_ctx);
+                    switch(sh) {
+                    case 1:
+                        gen_aa32_ld16u(s, tmp, addr, get_mem_index(s));
+                        break;
+                    case 2:
+                        gen_aa32_ld8s(s, tmp, addr, get_mem_index(s));
+                        break;
+                        default:
+                    case 3:
+                        gen_aa32_ld16s(s, tmp, addr, get_mem_index(s));
+                        break;
+                    }
                 } else {
                     /* store */
                     tmp = load_reg(s, rd);
                     gen_aa32_st16(s, tmp, addr, get_mem_index(s));
                     tcg_temp_free_i32(tcg_ctx, tmp);
-                    load = 0;
                 }
                 /* Perform base writeback before the loaded value to
                    ensure correct behavior with overlapping index registers.
                    ldrd with base writeback is is undefined if the
                    destination and index registers overlap.  */
-                if (!(insn & (1 << 24))) {
+                if (!pbit) {
                     gen_add_datah_offset(s, insn, address_offset, addr);
                     store_reg(s, rn, addr);
-                } else if (insn & (1 << 21)) {
+                } else if (wbit) {
                     if (address_offset)
                         tcg_gen_addi_i32(tcg_ctx, addr, addr, address_offset);
                     store_reg(s, rn, addr);
@@ -9893,7 +9902,7 @@ static int disas_thumb2_insn(CPUARMState *env, DisasContext *s, uint16_t insn_hw
             if (insn & 0x5000) {
                 /* Unconditional branch.  */
                 /* signextend(hw1[10:0]) -> offset[:12].  */
-                offset = ((int32_t)insn << 5) >> 9 & ~(int32_t)0xfff;
+                offset = ((int32_t)(insn << 5)) >> 9 & ~(int32_t)0xfff;
                 /* hw1[10:0] -> offset[11:1].  */
                 offset |= (insn & 0x7ff) << 1;
                 /* (~hw2[13, 11] ^ offset[24]) -> offset[23,22]
@@ -11117,8 +11126,8 @@ static void disas_thumb_insn(CPUARMState *env, DisasContext *s) // qq
 
         /* jump to the offset */
         val = (uint32_t)s->pc + 2;
-        offset = ((int32_t)insn << 24) >> 24;
-        val += offset << 1;
+        offset = ((int32_t)((uint32_t)insn << 24)) >> 24;
+        val += (int32_t)((uint32_t)offset << 1);
         gen_jmp(s, val);
         break;
 
@@ -11130,8 +11139,8 @@ static void disas_thumb_insn(CPUARMState *env, DisasContext *s) // qq
         }
         /* unconditional branch */
         val = (uint32_t)s->pc;
-        offset = ((int32_t)insn << 21) >> 21;
-        val += (offset << 1) + 2;
+        offset = ((int32_t)((uint32_t)insn << 21)) >> 21;
+        val += (int32_t)((uint32_t)offset << 1) + 2;
         gen_jmp(s, val);
         break;
 

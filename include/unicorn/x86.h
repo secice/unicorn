@@ -1,8 +1,11 @@
+/* Unicorn Emulator Engine */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015-2017 */
+/* This file is released under LGPL2.
+   See COPYING.LGPL2 in root directory for more details
+*/
+
 #ifndef UNICORN_X86_H
 #define UNICORN_X86_H
-
-/* Unicorn Emulator Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -85,7 +88,9 @@ typedef enum uc_x86_reg {
 	UC_X86_REG_IDTR, UC_X86_REG_GDTR, UC_X86_REG_LDTR, UC_X86_REG_TR, UC_X86_REG_FPCW,
 	UC_X86_REG_FPTAG,
     UC_X86_REG_MSR, // Model-Specific Register
-
+    UC_X86_REG_MXCSR,
+    UC_X86_REG_FS_BASE, // Base regs for x86_64
+    UC_X86_REG_GS_BASE,
     UC_X86_REG_ENDING		// <-- mark the end of the list of registers
 } uc_x86_reg;
 

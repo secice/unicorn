@@ -1,8 +1,11 @@
+/* Unicorn Engine */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015-2017 */
+/* This file is released under LGPL2.
+   See COPYING.LGPL2 in root directory for more details
+*/
+
 #ifndef UNICORN_ARM_H
 #define UNICORN_ARM_H
-
-/* Unicorn Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -130,6 +133,10 @@ typedef enum uc_arm_reg {
     UC_ARM_REG_C13_C0_2,
     UC_ARM_REG_C13_C0_3,
 
+    UC_ARM_REG_IPSR,
+    UC_ARM_REG_MSP,
+    UC_ARM_REG_PSP,
+    UC_ARM_REG_CONTROL,
     UC_ARM_REG_ENDING,		// <-- mark the end of the list or registers
 
     //> alias registers

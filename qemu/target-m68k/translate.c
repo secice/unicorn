@@ -664,7 +664,8 @@ static TCGv gen_ea(CPUM68KState *env, DisasContext *s, uint16_t insn,
                 offset = read_im32(env, s);
                 break;
             default:
-                g_assert_not_reached();
+                // Should not happen : for OS_SIGNLE
+                return *(TCGv *)tcg_ctx->NULL_QREG;
             }
             return tcg_const_i32(tcg_ctx, offset);
         default:
@@ -888,10 +889,7 @@ DISAS_INSN(undef_fpu)
 
 DISAS_INSN(undef)
 {
-    M68kCPU *cpu = m68k_env_get_cpu(env);
-
     gen_exception(s, s->pc - 2, EXCP_UNSUPPORTED);
-    cpu_abort(CPU(cpu), "Illegal instruction: %04x @ %08x", insn, s->pc - 2);
 }
 
 DISAS_INSN(mulw)
@@ -1172,7 +1170,7 @@ DISAS_INSN(bitop_im)
         bitnum &= 7;
     else
         bitnum &= 31;
-    mask = 1 << bitnum;
+    mask = 1U << bitnum;
 
     tmp = tcg_temp_new(tcg_ctx);
     assert (CCF_Z == (1 << 2));
@@ -2144,14 +2142,13 @@ DISAS_INSN(wddata)
 
 DISAS_INSN(wdebug)
 {
-    M68kCPU *cpu = m68k_env_get_cpu(env);
-
     if (IS_USER(s)) {
         gen_exception(s, s->pc - 2, EXCP_PRIVILEGE);
         return;
     }
     /* TODO: Implement wdebug.  */
-    cpu_abort(CPU(cpu), "WDEBUG not implemented");
+    qemu_log("WDEBUG not implemented\n");
+    gen_exception(s, s->pc - 2, EXCP_UNSUPPORTED);
 }
 
 DISAS_INSN(trap)
@@ -2248,8 +2245,9 @@ DISAS_INSN(fpu)
         case 1: /* FPIAR */
         case 2: /* FPSR */
         default:
-            cpu_abort(NULL, "Unimplemented: fmove to control %d",
-                      (ext >> 10) & 7);
+            qemu_log("Unimplemented: fmove to control %d\n",
+                     (ext >> 10) & 7);
+            goto undef;
         }
         break;
     case 5: /* fmove from control register.  */
@@ -2261,8 +2259,8 @@ DISAS_INSN(fpu)
         case 1: /* FPIAR */
         case 2: /* FPSR */
         default:
-            cpu_abort(NULL, "Unimplemented: fmove from control %d",
-                      (ext >> 10) & 7);
+            qemu_log("Unimplemented: fmove from control %d\n",
+                     (ext >> 10) & 7);
             goto undef;
         }
         DEST_EA(env, insn, OS_LONG, tmp32, NULL);

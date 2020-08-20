@@ -1,8 +1,11 @@
+/* Unicorn Emulator Engine */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015-2017 */
+/* This file is released under LGPL2.
+   See COPYING.LGPL2 in root directory for more details
+*/
+
 #ifndef UNICORN_MIPS_H
 #define UNICORN_MIPS_H
-
-/* Unicorn Emulator Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2015 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -171,6 +174,9 @@ typedef enum UC_MIPS_REG {
     UC_MIPS_REG_MPL0,
     UC_MIPS_REG_MPL1,
     UC_MIPS_REG_MPL2,
+
+    UC_MIPS_REG_CP0_CONFIG3,
+    UC_MIPS_REG_CP0_USERLOCAL,
 
     UC_MIPS_REG_ENDING,	// <-- mark the end of the list or registers
 
